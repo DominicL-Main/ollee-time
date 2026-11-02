@@ -544,7 +544,8 @@ extension WatchLink: CBCentralManagerDelegate {
             isAutoReconnecting = false
             reconnectTimer?.invalidate()
             reconnectTimer = nil
-            peripheral = nil
+            // `peripheral` here is the delegate parameter; the stored link is `self.peripheral`.
+            self.peripheral = nil
             appendLog("\(savedWatchName ?? "The saved watch") did not answer — showing everything nearby")
             startScan()
             return
