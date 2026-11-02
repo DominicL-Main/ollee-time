@@ -36,12 +36,27 @@ final class VoiceClock: ObservableObject {
     private var pendingReading: SpokenTime.Reading?
     private var lastEmitted: (label: String, at: Date)?
     private var restartCount = 0
+    /// Set while another app (the camera recording video, a call) holds the microphone. Listening is
+    /// paused rather than stopped, so it resumes by itself once that app releases the mic.
+    private var isInterrupted = false
 
     /// Waits for a phrase to stop changing before acting, so "ten thirty" is not sent as "ten
     /// thirty" and again as "ten thirty five".
     private static let settleDelay: TimeInterval = 0.8
     /// Repeating the same time within this window is treated as one request.
     private static let repeatWindow: TimeInterval = 5
+
+    init() {
+        // Another app taking the microphone ends our input without the user pressing anything, so
+        // watch for that and pick the stream back up afterwards.
+        _ = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in self?.handleInterruption(note) }
+        }
+    }
 
     // MARK: - Control
 
@@ -92,6 +107,13 @@ final class VoiceClock: ObservableObject {
     private func stop(with message: String) {
         stop()
         problem = message
+    }
+
+    /// Called when the app returns to the foreground: an interruption that ended while the app was in
+    /// the background does not always restart the stream on its own.
+    func resumeIfNeeded() {
+        guard wantsListening, !isInterrupted else { return }
+        if !engine.isRunning { scheduleRestart() }
     }
 
     // MARK: - Permission
@@ -171,6 +193,13 @@ final class VoiceClock: ObservableObject {
     }
 
     private func teardown() {
+        pauseStreaming()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// Drops the audio pipeline but leaves the session alone, so an interruption can be resumed
+    /// without fighting the app that currently owns the microphone.
+    private func pauseStreaming() {
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -182,7 +211,6 @@ final class VoiceClock: ObservableObject {
         task?.cancel()
         request = nil
         task = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     // MARK: - Results
@@ -204,7 +232,7 @@ final class VoiceClock: ObservableObject {
     }
 
     private func scheduleRestart() {
-        guard wantsListening, restartTimer == nil else { return }
+        guard wantsListening, !isInterrupted, restartTimer == nil else { return }
         let delay = min(0.4 * Double(restartCount + 1), 3)
         restartTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.restart() }
@@ -214,7 +242,7 @@ final class VoiceClock: ObservableObject {
     private func restart() {
         restartTimer?.invalidate()
         restartTimer = nil
-        guard wantsListening else { return }
+        guard wantsListening, !isInterrupted else { return }
 
         teardown()
         do {
@@ -226,6 +254,34 @@ final class VoiceClock: ObservableObject {
             } else {
                 scheduleRestart()
             }
+        }
+    }
+
+    // MARK: - Interruptions
+
+    private func handleInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+
+        switch type {
+        case .began:
+            guard wantsListening else { return }
+            isInterrupted = true
+            restartTimer?.invalidate()
+            restartTimer = nil
+            settleTimer?.invalidate()
+            settleTimer = nil
+            pendingReading = nil
+            transcript = ""
+            pauseStreaming()
+            problem = "Another app is using the microphone. Listening resumes when it finishes."
+        case .ended:
+            guard wantsListening else { return }
+            isInterrupted = false
+            problem = nil
+            scheduleRestart()
+        @unknown default:
+            break
         }
     }
 

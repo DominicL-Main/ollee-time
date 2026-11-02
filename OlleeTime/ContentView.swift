@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ContentView: View {
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @StateObject private var watch = WatchLink()
     @StateObject private var voice = VoiceClock()
     @State private var target = Date()
@@ -40,6 +42,9 @@ struct ContentView: View {
                 guard let detection, !busy else { return }
                 target = detection.time
                 send(detection.time)
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { voice.resumeIfNeeded() }
             }
         }
     }
@@ -84,6 +89,20 @@ struct ContentView: View {
             Text("iOS lists the watch among many unnamed accessories. Tap it below, or let the app check them for you.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+
+            if let remembered = watch.savedWatchName {
+                HStack(spacing: 6) {
+                    Image(systemName: "bookmark.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.tint)
+                    Text("Remembering \(remembered)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Forget") { watch.forgetSavedWatch() }
+                        .font(.caption)
+                }
+            }
 
             Button {
                 banner = nil
@@ -134,6 +153,11 @@ struct ContentView: View {
                                             .font(.caption2)
                                             .foregroundStyle(.tertiary)
                                     }
+                                    if device.isSaved {
+                                        Image(systemName: "bookmark.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.blue)
+                                    }
                                 }
                                 Text(subtitle(for: device))
                                     .font(.caption2)
@@ -162,6 +186,9 @@ struct ContentView: View {
 
     private func subtitle(for device: DiscoveredWatch) -> String {
         var parts = ["\(device.rssi) dBm"]
+        if device.isSaved {
+            parts.append("remembered watch")
+        }
         if device.isWatch == true {
             parts.append("Ollee service found")
         } else if device.advertisesOlleeService {

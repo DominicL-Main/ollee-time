@@ -51,6 +51,8 @@ OlleeTime/
   WatchLink.swift               CoreBluetooth scan/connect/write + acknowledgement
   OlleeProtocol.swift           framing, CRC, set-clock payload (no CoreBluetooth)
   PhoneLocation.swift           best-effort coordinates for the sun/moon face
+  SpokenTime.swift              turns "quarter to nine pm" into an hour and minute
+  VoiceClock.swift              continuous speech capture that reports each heard time
 .github/workflows/ios-build.yml builds an unsigned .ipa on a macOS runner
 ```
 
@@ -122,6 +124,12 @@ a time spoken without am/pm resolves to whichever reading is nearer the current 
 
 The first use asks for Microphone and Speech Recognition permission; say "Allow".
 
+Listening survives leaving the app: the `audio` background mode keeps the microphone live while
+you switch apps, and the `bluetooth-central` mode keeps the watch link up, so a time heard in the
+background still reaches the watch. It does **not** survive the Camera app recording video — iOS
+gives the microphone to one app at a time, so recording interrupts listening. When the recording
+stops, the app picks listening back up by itself; the button stays on and needs no second tap.
+
 ## Finding the watch
 
 iOS gives apps no list of paired devices, so the app scans and every nearby accessory shows up,
@@ -132,8 +140,12 @@ most of them unnamed. Two things make the watch findable:
   rely on when they pick the watch out of `bondedDevices`; nothing about the advertised name is
   trustworthy. Devices that fail the check are marked with a struck-through icon so you can ignore
   them, and a green seal means the Ollee service was found.
-- **The app remembers your watch.** The first successful connection is stored, and on later launches
-  the app reconnects to it by itself instead of showing the list again.
+- **The app remembers your watch.** The first successful connection stores the watch's identifier
+  (which iOS keeps for that peripheral) and its name. On later launches the app asks iOS for that
+  peripheral directly and connects without scanning first, so it reconnects in roughly a second
+  instead of waiting for the list to fill up. The name is cached because iOS usually forgets it,
+  which is why the watch can reappear under a real name rather than "Unnamed device". The remembered
+  watch sorts to the top with a bookmark icon; **Forget** clears it.
 
 Close the official Ollee app first: the watch accepts a single connection at a time.
 

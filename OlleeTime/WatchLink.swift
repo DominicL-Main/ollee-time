@@ -12,6 +12,8 @@ struct DiscoveredWatch: Identifiable, Equatable {
     var advertisesOlleeService: Bool = false
     /// `nil` until proven: true once the watch's service was seen, false once a probe ruled it out.
     var isWatch: Bool? = nil
+    /// True for the peripheral remembered from an earlier session.
+    var isSaved: Bool = false
 
     var isNamed: Bool { name != "Unnamed device" }
 }
@@ -90,6 +92,8 @@ final class WatchLink: NSObject, ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var isIdentifying = false
     @Published private(set) var identifyProgress: String?
+    /// The name of the watch remembered from last time, `nil` until one has been connected.
+    @Published private(set) var savedWatchName: String?
 
     var isConnected: Bool { status.isConnected }
 
@@ -112,8 +116,23 @@ final class WatchLink: NSObject, ObservableObject {
     private var probeDone = 0
     private var probeTimer: Timer?
     private var autoConnectAttempted = false
+    private var isAutoReconnecting = false
+    private var reconnectTimer: Timer?
 
-    private static let lastWatchKey = "ollee.lastWatchIdentifier"
+    /// What iOS lets us keep between launches: the peripheral UUID is the stable handle, the name is
+    /// only cached because iOS often forgets it.
+    private struct SavedWatch: Codable {
+        let id: String
+        let name: String
+        let savedAt: Date
+    }
+
+    private var savedWatch: SavedWatch? {
+        didSet { savedWatchName = savedWatch?.name }
+    }
+
+    private static let savedWatchKey = "ollee.savedWatch"
+    private static let legacyWatchKey = "ollee.lastWatchIdentifier"
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -123,6 +142,7 @@ final class WatchLink: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        loadSavedWatch()
         central = CBCentralManager(delegate: self,
                                    queue: .main,
                                    options: [CBCentralManagerOptionShowPowerAlertKey: true])
@@ -253,6 +273,89 @@ final class WatchLink: NSObject, ObservableObject {
         log.removeAll()
     }
 
+    // MARK: - Remembered watch
+
+    private func loadSavedWatch() {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: Self.savedWatchKey),
+           let saved = try? JSONDecoder().decode(SavedWatch.self, from: data) {
+            savedWatch = saved
+            return
+        }
+        // Carry over the identifier stored by earlier builds, which knew no name.
+        if let legacy = defaults.string(forKey: Self.legacyWatchKey) {
+            savedWatch = SavedWatch(id: legacy, name: "your watch", savedAt: Date())
+        }
+    }
+
+    private func rememberWatch(id: UUID, name: String) {
+        // Never remember the placeholder: a named watch keeps its name, an unnamed one keeps the
+        // name it was given the first time.
+        let remembered = name == "Unnamed device" ? (savedWatch?.name ?? "your watch") : name
+        savedWatch = SavedWatch(id: id.uuidString, name: remembered, savedAt: Date())
+        if let data = try? JSONEncoder().encode(savedWatch) {
+            UserDefaults.standard.set(data, forKey: Self.savedWatchKey)
+        }
+    }
+
+    func forgetSavedWatch() {
+        let previous = savedWatchName
+        savedWatch = nil
+        UserDefaults.standard.removeObject(forKey: Self.savedWatchKey)
+        UserDefaults.standard.removeObject(forKey: Self.legacyWatchKey)
+        appendLog("Forgot \(previous ?? "the saved watch") — pick it from the list next time")
+    }
+
+    /// Connects straight to the watch iOS already knows, without waiting for it to show up in a scan.
+    ///
+    /// Scanning takes seconds because every nearby accessory has to be listed first; the stored
+    /// identifier lets CoreBluetooth reconnect in one call. If the watch is out of range the attempt
+    /// is abandoned after a few seconds and the normal scan takes over.
+    private func reconnectToSavedWatch() {
+        guard !isConnected, !isIdentifying, !autoConnectAttempted,
+              let central, central.state == .poweredOn else {
+            startScan()
+            return
+        }
+        guard let saved = savedWatch, let uuid = UUID(uuidString: saved.id) else {
+            startScan()
+            return
+        }
+
+        let known = central.retrievePeripherals(withIdentifiers: [uuid])
+        guard let target = known.first else {
+            appendLog("\(saved.name) is not known to iOS yet — scanning instead")
+            startScan()
+            return
+        }
+
+        autoConnectAttempted = true
+        isAutoReconnecting = true
+        peripheral = target
+        target.delegate = self
+        connectedName = saved.name
+        status = .connecting(saved.name)
+        appendLog("Reconnecting to \(saved.name)…")
+        central.connect(target, options: nil)
+
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.savedReconnectTimedOut() }
+        }
+    }
+
+    private func savedReconnectTimedOut() {
+        reconnectTimer = nil
+        guard isAutoReconnecting else { return }
+        isAutoReconnecting = false
+        if let pending = peripheral {
+            // Drop the reference first so the resulting disconnect callback is ignored.
+            peripheral = nil
+            central?.cancelPeripheralConnection(pending)
+        }
+        appendLog("\(savedWatchName ?? "The saved watch") did not answer — showing everything nearby")
+        startScan()
+    }
+
     // MARK: - Setting the clock
 
     /// Sends the set-clock frame and resolves when the watch acknowledges or the wait expires.
@@ -353,7 +456,9 @@ extension WatchLink: CBCentralManagerDelegate {
         switch central.state {
         case .poweredOn:
             appendLog("Bluetooth ready")
-            rescan()
+            devices.removeAll()
+            discovered.removeAll()
+            reconnectToSavedWatch()
         case .poweredOff:
             status = .bluetoothOff
             appendLog("Bluetooth is off")
@@ -374,9 +479,13 @@ extension WatchLink: CBCentralManagerDelegate {
                         rssi RSSI: NSNumber) {
         guard !isConnected else { return }
 
-        let name = peripheral.name
+        let advertisedName = peripheral.name
             ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? "Unnamed device"
+        let isSaved = savedWatch?.id == peripheral.identifier.uuidString
+        // iOS keeps the peripheral's UUID across launches but usually drops its name, so a remembered
+        // watch is labelled from the stored name instead of showing up as "Unnamed device" again.
+        let name = advertisedName
+            ?? (isSaved ? (savedWatch?.name ?? "Unnamed device") : "Unnamed device")
         let rssi = RSSI.intValue
         let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let advertises = advertised.contains(CBUUID(string: OlleeProtocol.serviceUUID))
@@ -387,29 +496,29 @@ extension WatchLink: CBCentralManagerDelegate {
         if !autoConnectAttempted,
            !isConnected,
            !isIdentifying,
-           let saved = UserDefaults.standard.string(forKey: Self.lastWatchKey),
-           saved == peripheral.identifier.uuidString {
+           isSaved {
             appendLog("Your saved watch reappeared — reconnecting")
             connect(to: DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
-                                        advertisesOlleeService: advertises))
+                                        advertisesOlleeService: advertises, isSaved: true))
             return
         }
 
         if let index = devices.firstIndex(where: { $0.id == peripheral.identifier }) {
             var updated = DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
-                                          advertisesOlleeService: advertises)
+                                          advertisesOlleeService: advertises, isSaved: isSaved)
             updated.isWatch = devices[index].isWatch ?? (advertises ? true : nil)
             devices[index] = updated
         } else {
             var fresh = DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
-                                        advertisesOlleeService: advertises)
+                                        advertisesOlleeService: advertises, isSaved: isSaved)
             fresh.isWatch = advertises ? true : nil
             devices.append(fresh)
         }
 
-        // Confirmed watches first, then named devices, then strongest signal, so the watch climbs to
-        // the top even before it has been identified.
+        // The remembered watch first, then confirmed watches, named devices, strongest signal — so
+        // the watch climbs to the top even before it has been identified.
         devices.sort { lhs, rhs in
+            if lhs.isSaved != rhs.isSaved { return lhs.isSaved }
             if (lhs.isWatch == true) != (rhs.isWatch == true) { return lhs.isWatch == true }
             if lhs.isNamed != rhs.isNamed { return lhs.isNamed }
             if (lhs.rssi == 127) != (rhs.rssi == 127) { return rhs.rssi == 127 }
@@ -421,6 +530,9 @@ extension WatchLink: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        isAutoReconnecting = false
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
         appendLog("Connected — looking for the Ollee service…")
         peripheral.discoverServices([CBUUID(string: OlleeProtocol.serviceUUID)])
     }
@@ -428,6 +540,15 @@ extension WatchLink: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager,
                         didFailToConnect peripheral: CBPeripheral,
                         error: Error?) {
+        if isAutoReconnecting {
+            isAutoReconnecting = false
+            reconnectTimer?.invalidate()
+            reconnectTimer = nil
+            peripheral = nil
+            appendLog("\(savedWatchName ?? "The saved watch") did not answer — showing everything nearby")
+            startScan()
+            return
+        }
         if isIdentifying, probeInFlight == peripheral.identifier {
             appendLog("Could not reach \(connectedName) — skipping")
             markWatch(peripheral.identifier, isWatch: false)
@@ -530,7 +651,7 @@ extension WatchLink: CBPeripheralDelegate {
         // Mark the link usable as soon as a write path exists: the notify subscription can report
         // back late (or never) on some firmware, and a stuck "Connecting…" would block the UI.
         status = .connected(connectedName)
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.lastWatchKey)
+        rememberWatch(id: peripheral.identifier, name: connectedName)
         markWatch(peripheral.identifier, isWatch: true)
         if isIdentifying {
             finishIdentifySuccess()
