@@ -73,13 +73,13 @@ Pick your team under *Signing & Capabilities*, then Run (or Product ▸ Archive)
 
 1. `PRODUCT_BUNDLE_IDENTIFIER` is already set to `com.dominiclm.olleetime`. Only change it if you
 sign with a different Apple ID and hit a bundle-ID collision.
-2. Push this project to a GitHub repository.
-3. **Actions** ▸ **Build IPA** ▸ **Run workflow**.
+2. The app is published at `https://github.com/DominicL-Main/ollee-time`; push any change there.
+3. Every push to `main` builds and publishes automatically (or start one by hand: **Actions** ▸ **Build IPA** ▸ **Run workflow**).
 4. When the run finishes, open **Releases** and download `OlleeTime-unsigned.ipa`. The same file
 stays reachable at a permanent URL that updates on every later run:
 
    ```
-   https://github.com/<you>/<repo>/releases/latest/download/OlleeTime-unsigned.ipa
+   https://github.com/DominicL-Main/ollee-time/releases/latest/download/OlleeTime-unsigned.ipa
    ```
 
 The IPA is **unsigned** on purpose — SideStore signs it on-device with your Apple ID, so this is
