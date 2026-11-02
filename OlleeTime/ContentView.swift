@@ -1,5 +1,6 @@
 import CoreLocation
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
 
@@ -45,7 +46,12 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active { voice.resumeIfNeeded() }
+                // A sleeping phone suspends the app and drops the watch link, so the screen is kept
+                // awake for as long as the app is in use.
+                UIApplication.shared.isIdleTimerDisabled = phase != .background
             }
+            .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 
