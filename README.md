@@ -110,6 +110,18 @@ watch link and the sunrise/sunset face respectively.
 The Activity card logs every frame (`TX`/`RX`) so you can see exactly what was sent and whether the
 watch acknowledged it.
 
+### Set the time by voice
+
+Tap **Set the time by voice** and the app listens continuously; tap it again to stop. Every
+complete time it hears goes straight to the watch, so "ten thirty", "quarter to nine pm", "seven
+o'clock" and "half past six" all work without touching the wheel.
+
+A phrase is only acted on once it is finished — a lone "ten" could still become "ten thirty" — and
+a time spoken without am/pm resolves to whichever reading is nearer the current time, so "seven" at
+6:50 pm means 19:00. Recognition runs on the device where the phone supports it.
+
+The first use asks for Microphone and Speech Recognition permission; say "Allow".
+
 ## Finding the watch
 
 iOS gives apps no list of paired devices, so the app scans and every nearby accessory shows up,

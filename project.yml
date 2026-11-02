@@ -27,6 +27,8 @@ targets:
           - UIInterfaceOrientationPortrait
         NSBluetoothAlwaysUsageDescription: Ollee Time uses Bluetooth to send the clock time to your Ollee watch.
         NSLocationWhenInUseUsageDescription: Ollee Time includes your approximate location when setting the clock so the watch's sunrise and sunset face stays correct.
+        NSMicrophoneUsageDescription: Ollee Time listens to the time you say out loud so the watch clock can be set by voice.
+        NSSpeechRecognitionUsageDescription: Ollee Time turns your spoken time into an hour and minute. Speech is transcribed on the device and nothing is stored.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dominiclm.olleetime

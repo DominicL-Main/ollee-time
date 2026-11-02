@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
 
     @StateObject private var watch = WatchLink()
+    @StateObject private var voice = VoiceClock()
     @State private var target = Date()
     @State private var banner: Banner?
     @State private var busy = false
@@ -35,6 +36,11 @@ struct ContentView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Ollee Time")
+            .onChange(of: voice.detection) { detection in
+                guard let detection, !busy else { return }
+                target = detection.time
+                send(detection.time)
+            }
         }
     }
 
@@ -205,6 +211,8 @@ struct ContentView: View {
             .font(.footnote)
             .disabled(busy)
 
+            voiceRow
+
             Text("Today's date and your phone's current UTC offset are sent along with the time.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -213,6 +221,47 @@ struct ContentView: View {
         .padding(16)
         .frame(maxWidth: .infinity)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Voice
+
+    private var voiceRow: some View {
+        VStack(spacing: 8) {
+            Button {
+                banner = nil
+                voice.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: voice.isListening ? "mic.fill" : "mic")
+                    Text(voice.isListening ? "Listening — tap to stop" : "Set the time by voice")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.bordered)
+            .tint(voice.isListening ? .red : .accentColor)
+            .disabled(busy)
+
+            if voice.isListening {
+                Text(voice.transcript.isEmpty
+                     ? "Say a time, like “ten thirty” or “quarter to nine pm”."
+                     : "“\(voice.transcript)”")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+
+            if let problem = voice.problem {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            }
+        }
     }
 
     // MARK: - Banner
