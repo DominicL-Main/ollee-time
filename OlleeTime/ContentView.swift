@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var target = Date()
     @State private var banner: Banner?
     @State private var busy = false
+    @AppStorage("ollee.keepScreenOn") private var keepScreenOn = true
 
     private struct Banner {
         let text: String
@@ -33,6 +34,8 @@ struct ContentView: View {
                         bannerRow(banner)
                     }
 
+                    optionsCard
+
                     logCard
                 }
                 .padding(16)
@@ -46,11 +49,10 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active { voice.resumeIfNeeded() }
-                // A sleeping phone suspends the app and drops the watch link, so the screen is kept
-                // awake for as long as the app is in use.
-                UIApplication.shared.isIdleTimerDisabled = phase != .background
+                applyIdleTimer()
             }
-            .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+            .onChange(of: keepScreenOn) { _ in applyIdleTimer() }
+            .onAppear { applyIdleTimer() }
             .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
@@ -295,6 +297,30 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    // MARK: - Options
+
+    /// A sleeping phone suspends the app and drops the watch link, so the screen is held awake for
+    /// as long as the app is in the foreground unless the switch is turned off.
+    private func applyIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = keepScreenOn && scenePhase != .background
+    }
+
+    private var optionsCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Keep the screen awake", isOn: $keepScreenOn)
+                .font(.subheadline)
+            Text(keepScreenOn
+                 ? "The phone will not auto-lock while the app is open, so the watch link stays up. This uses more battery."
+                 : "The screen may sleep and the app will be suspended; the watch link then relies on the Bluetooth background mode alone.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
     // MARK: - Banner

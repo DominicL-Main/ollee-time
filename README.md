@@ -110,8 +110,8 @@ watch link and the sunrise/sunset face respectively.
 4. Set the hour and minute, then tap **Set watch to …**.
 
 The screen stays awake while the app is open: iOS would otherwise sleep the phone and suspend
-the watch link mid-session. Nothing to switch on — it is automatic, and the screen is allowed to
-sleep again as soon as you leave the app.
+the watch link mid-session. The **Keep the screen awake** switch (on by default) controls this;
+turn it off to save battery. Either way the screen sleeps again once you leave the app.
 
 The Activity card logs every frame (`TX`/`RX`) so you can see exactly what was sent and whether the
 watch acknowledged it.
