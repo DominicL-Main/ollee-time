@@ -64,6 +64,9 @@ jobs:
           TAG="latest-ipa"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" out/OlleeTime-unsigned.ipa --clobber
+            # --clobber replaces the asset but leaves the notes alone, which would label
+            # every rebuild with an old commit. Keep the download page truthful.
+            gh release edit "$TAG" --notes "Unsigned build of ${GITHUB_SHA::7}, for SideStore / AltStore / Sideloadly. Download the .ipa and open it in SideStore."
           else
             gh release create "$TAG" out/OlleeTime-unsigned.ipa \
               --title "Ollee Time - unsigned IPA" \
