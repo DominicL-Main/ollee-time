@@ -1,0 +1,71 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project OlleeTime.xcodeproj \
+            -scheme OlleeTime \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP="build/Build/Products/Release-iphoneos/OlleeTime.app"
+          test -d "$APP" || { echo "::error::No .app bundle was produced"; exit 1; }
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry OlleeTime-unsigned.ipa Payload
+          ls -lh OlleeTime-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OlleeTime-unsigned-ipa
+          path: out/OlleeTime-unsigned.ipa
+          if-no-files-found: error
+
+      # SideStore / AltStore / Sideloadly all sign the app themselves, so the IPA stays unsigned.
+      # Publishing a release keeps one stable download URL across rebuilds.
+      - name: Publish IPA to a release
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="latest-ipa"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/OlleeTime-unsigned.ipa --clobber
+          else
+            gh release create "$TAG" out/OlleeTime-unsigned.ipa \
+              --title "Ollee Time - unsigned IPA" \
+              --notes "Unsigned build of ${GITHUB_SHA::7}, for SideStore / AltStore / Sideloadly. Download the .ipa and open it in SideStore." \
+              --latest
+          fi
