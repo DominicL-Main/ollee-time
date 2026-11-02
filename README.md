@@ -110,6 +110,21 @@ watch link and the sunrise/sunset face respectively.
 The Activity card logs every frame (`TX`/`RX`) so you can see exactly what was sent and whether the
 watch acknowledged it.
 
+## Finding the watch
+
+iOS gives apps no list of paired devices, so the app scans and every nearby accessory shows up,
+most of them unnamed. Two things make the watch findable:
+
+- **Find my watch for me** connects to nearby devices one at a time and stops at the first one that
+  exposes the Ollee (Nordic UART) service. That service check is the same signature the Android ports
+  rely on when they pick the watch out of `bondedDevices`; nothing about the advertised name is
+  trustworthy. Devices that fail the check are marked with a struck-through icon so you can ignore
+  them, and a green seal means the Ollee service was found.
+- **The app remembers your watch.** The first successful connection is stored, and on later launches
+  the app reconnects to it by itself instead of showing the list again.
+
+Close the official Ollee app first: the watch accepts a single connection at a time.
+
 ## Troubleshooting
 
 - **No devices listed** — Bluetooth is off, permission was denied (Settings ▸ Ollee Time), or the

@@ -8,6 +8,12 @@ struct DiscoveredWatch: Identifiable, Equatable {
     let id: UUID
     let name: String
     let rssi: Int
+    /// Set when the advertisement itself carries the Nordic UART service UUID.
+    var advertisesOlleeService: Bool = false
+    /// `nil` until proven: true once the watch's service was seen, false once a probe ruled it out.
+    var isWatch: Bool? = nil
+
+    var isNamed: Bool { name != "Unnamed device" }
 }
 
 /// One line in the on-screen activity log.
@@ -82,6 +88,8 @@ final class WatchLink: NSObject, ObservableObject {
     @Published private(set) var devices: [DiscoveredWatch] = []
     @Published private(set) var log: [LogEntry] = []
     @Published private(set) var isSending = false
+    @Published private(set) var isIdentifying = false
+    @Published private(set) var identifyProgress: String?
 
     var isConnected: Bool { status.isConnected }
 
@@ -97,6 +105,15 @@ final class WatchLink: NSObject, ObservableObject {
     private var ackTimer: Timer?
     private var watchdog: Timer?
     private var connectedName = ""
+
+    private var probeQueue: [UUID] = []
+    private var probeInFlight: UUID?
+    private var probeTotal = 0
+    private var probeDone = 0
+    private var probeTimer: Timer?
+    private var autoConnectAttempted = false
+
+    private static let lastWatchKey = "ollee.lastWatchIdentifier"
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -115,9 +132,13 @@ final class WatchLink: NSObject, ObservableObject {
     // MARK: - Scanning and connecting
 
     func rescan() {
-        guard let central else { return }
         devices.removeAll()
         discovered.removeAll()
+        startScan()
+    }
+
+    private func startScan() {
+        guard let central else { return }
         central.stopScan()
         status = .scanning
         appendLog("Scanning for nearby devices…")
@@ -126,7 +147,8 @@ final class WatchLink: NSObject, ObservableObject {
     }
 
     func connect(to device: DiscoveredWatch) {
-        guard let central, let target = discovered[device.id] else { return }
+        guard !isIdentifying, let central, let target = discovered[device.id] else { return }
+        autoConnectAttempted = true
         central.stopScan()
         peripheral = target
         target.delegate = self
@@ -134,6 +156,91 @@ final class WatchLink: NSObject, ObservableObject {
         status = .connecting(device.name)
         appendLog("Connecting to \(device.name)…")
         central.connect(target, options: nil)
+    }
+
+    /// Connects to nearby devices one at a time until one exposes the Ollee (Nordic UART) service.
+    ///
+    /// Names cannot help here: iOS shows no paired-device list and the watch usually advertises no
+    /// name, so the GATT table is the only reliable signature.
+    func findWatch() {
+        guard !isConnected, !isIdentifying else { return }
+        let candidates = devices.filter { $0.isWatch != false }
+        guard !candidates.isEmpty else {
+            appendLog("Nothing to check yet — still scanning.")
+            return
+        }
+        isIdentifying = true
+        probeQueue = candidates.map(\.id)
+        probeTotal = probeQueue.count
+        probeDone = 0
+        appendLog("Checking \(probeTotal) nearby devices for the Ollee service…")
+        probeNext()
+    }
+
+    private func probeNext() {
+        probeTimer?.invalidate()
+        probeTimer = nil
+        guard isIdentifying else { return }
+        guard let central else {
+            endIdentifying(with: "Bluetooth is unavailable.")
+            return
+        }
+        guard let next = probeQueue.first(where: { discovered[$0] != nil }) else {
+            endIdentifying(with: "No Ollee watch nearby. Wake it with a button press and try again.")
+            return
+        }
+        probeQueue.removeAll { $0 == next }
+        guard let target = discovered[next] else { return }
+
+        probeDone += 1
+        probeInFlight = next
+        identifyProgress = "Checking device \(probeDone) of \(probeTotal)…"
+
+        let label = devices.first { $0.id == next }?.name ?? "device"
+        connectedName = label
+        peripheral = target
+        target.delegate = self
+        status = .connecting(label)
+        central.stopScan()
+        central.connect(target, options: nil)
+
+        probeTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
+            guard let self, self.isIdentifying, self.probeInFlight == next else { return }
+            self.appendLog("\(label) did not answer — skipping")
+            self.markWatch(next, isWatch: false)
+            self.probeInFlight = nil
+            self.peripheral = nil
+            self.central?.cancelPeripheralConnection(target)
+            self.probeNext()
+        }
+    }
+
+    private func markWatch(_ id: UUID, isWatch: Bool) {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+        devices[index].isWatch = isWatch
+    }
+
+    private func endIdentifying(with message: String?) {
+        isIdentifying = false
+        probeInFlight = nil
+        identifyProgress = nil
+        probeQueue.removeAll()
+        probeTimer?.invalidate()
+        probeTimer = nil
+        peripheral = nil
+        if let message { appendLog(message) }
+        if let central, central.state == .poweredOn { startScan() }
+    }
+
+    private func finishIdentifySuccess() {
+        isIdentifying = false
+        probeInFlight = nil
+        identifyProgress = nil
+        probeQueue.removeAll()
+        probeTimer?.invalidate()
+        probeTimer = nil
+        autoConnectAttempted = true
+        appendLog("This one is the watch — \(connectedName)")
     }
 
     func disconnect() {
@@ -271,18 +378,41 @@ extension WatchLink: CBCentralManagerDelegate {
             ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? "Unnamed device"
         let rssi = RSSI.intValue
+        let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let advertises = advertised.contains(CBUUID(string: OlleeProtocol.serviceUUID))
 
         discovered[peripheral.identifier] = peripheral
 
-        if let index = devices.firstIndex(where: { $0.id == peripheral.identifier }) {
-            devices[index] = DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi)
-        } else {
-            devices.append(DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi))
+        // Once a watch has been used, reconnect to it silently instead of showing the list again.
+        if !autoConnectAttempted,
+           !isConnected,
+           !isIdentifying,
+           let saved = UserDefaults.standard.string(forKey: Self.lastWatchKey),
+           saved == peripheral.identifier.uuidString {
+            appendLog("Your saved watch reappeared — reconnecting")
+            connect(to: DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
+                                        advertisesOlleeService: advertises))
+            return
         }
 
+        if let index = devices.firstIndex(where: { $0.id == peripheral.identifier }) {
+            var updated = DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
+                                          advertisesOlleeService: advertises)
+            updated.isWatch = devices[index].isWatch ?? (advertises ? true : nil)
+            devices[index] = updated
+        } else {
+            var fresh = DiscoveredWatch(id: peripheral.identifier, name: name, rssi: rssi,
+                                        advertisesOlleeService: advertises)
+            fresh.isWatch = advertises ? true : nil
+            devices.append(fresh)
+        }
+
+        // Confirmed watches first, then named devices, then strongest signal, so the watch climbs to
+        // the top even before it has been identified.
         devices.sort { lhs, rhs in
-            if lhs.rssi == 127 { return false }
-            if rhs.rssi == 127 { return true }
+            if (lhs.isWatch == true) != (rhs.isWatch == true) { return lhs.isWatch == true }
+            if lhs.isNamed != rhs.isNamed { return lhs.isNamed }
+            if (lhs.rssi == 127) != (rhs.rssi == 127) { return rhs.rssi == 127 }
             return lhs.rssi > rhs.rssi
         }
         if devices.count > 40 {
@@ -298,6 +428,14 @@ extension WatchLink: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager,
                         didFailToConnect peripheral: CBPeripheral,
                         error: Error?) {
+        if isIdentifying, probeInFlight == peripheral.identifier {
+            appendLog("Could not reach \(connectedName) — skipping")
+            markWatch(peripheral.identifier, isWatch: false)
+            probeInFlight = nil
+            self.peripheral = nil
+            probeNext()
+            return
+        }
         appendLog("Connection failed: \(error?.localizedDescription ?? "unknown error")")
         self.peripheral = nil
         rescan()
@@ -306,12 +444,21 @@ extension WatchLink: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager,
                         didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
+        // A late callback from a peripheral we already moved past must not tear down the current link.
+        guard self.peripheral?.identifier == peripheral.identifier else { return }
+
         appendLog("Disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
         self.peripheral = nil
         writeCharacteristic = nil
         notifyCharacteristic = nil
         reassembler = OlleeProtocol.Reassembler()
         completeSend(.failure(WatchLinkError.notConnected))
+
+        if isIdentifying, probeInFlight == peripheral.identifier {
+            probeInFlight = nil
+            probeNext()
+            return
+        }
         status = .idle
     }
 }
@@ -329,6 +476,16 @@ extension WatchLink: CBPeripheralDelegate {
 
         let uuid = CBUUID(string: OlleeProtocol.serviceUUID)
         guard let service = peripheral.services?.first(where: { $0.uuid == uuid }) else {
+            markWatch(peripheral.identifier, isWatch: false)
+            if isIdentifying, probeInFlight == peripheral.identifier {
+                appendLog("Not the watch — moving on")
+                probeInFlight = nil
+                probeTimer?.invalidate()
+                probeTimer = nil
+                central?.cancelPeripheralConnection(peripheral)
+                probeNext()
+                return
+            }
             appendLog("Ollee service not found — is this the watch?")
             completeSend(.failure(WatchLinkError.missingService))
             disconnect()
@@ -373,6 +530,11 @@ extension WatchLink: CBPeripheralDelegate {
         // Mark the link usable as soon as a write path exists: the notify subscription can report
         // back late (or never) on some firmware, and a stuck "Connecting…" would block the UI.
         status = .connected(connectedName)
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.lastWatchKey)
+        markWatch(peripheral.identifier, isWatch: true)
+        if isIdentifying {
+            finishIdentifySuccess()
+        }
         if notifyCharacteristic == nil {
             appendLog("Ready (no notify characteristic — acknowledgements disabled)")
         }

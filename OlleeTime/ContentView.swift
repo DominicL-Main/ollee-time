@@ -75,9 +75,30 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Choose your watch")
                 .font(.headline)
-            Text("Wake the watch, close the official Ollee app, then tap it below.")
+            Text("iOS lists the watch among many unnamed accessories. Tap it below, or let the app check them for you.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+
+            Button {
+                banner = nil
+                watch.findWatch()
+            } label: {
+                HStack(spacing: 8) {
+                    if watch.isIdentifying {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                    }
+                    Text(watch.isIdentifying
+                         ? (watch.identifyProgress ?? "Checking…")
+                         : "Find my watch for me")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(watch.isIdentifying || watch.devices.isEmpty)
 
             if watch.devices.isEmpty {
                 HStack(spacing: 8) {
@@ -95,9 +116,20 @@ struct ContentView: View {
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(device.name)
-                                    .foregroundStyle(.primary)
-                                Text("\(device.rssi) dBm")
+                                HStack(spacing: 5) {
+                                    Text(device.name)
+                                        .foregroundStyle(.primary)
+                                    if device.isWatch == true {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    } else if device.isWatch == false {
+                                        Image(systemName: "xmark.circle")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                Text(subtitle(for: device))
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -120,6 +152,16 @@ struct ContentView: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func subtitle(for device: DiscoveredWatch) -> String {
+        var parts = ["\(device.rssi) dBm"]
+        if device.isWatch == true {
+            parts.append("Ollee service found")
+        } else if device.advertisesOlleeService {
+            parts.append("advertises Ollee service")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Clock
